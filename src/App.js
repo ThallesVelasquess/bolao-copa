@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect} from "react";
 
 const BIN_ID = "6a31bc77da38895dfecc6962";
 const ACCESS_KEY = "$2a$10$PSWhMqV5dRadaudB0kH2eOiz068nAa0uxXf2zvXStpXxXF8Cp4P1G";

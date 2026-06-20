@@ -1,4 +1,4 @@
-import { useState, useEffect} from "react";
+import { useState, useEffect } from "react";
 
 const BIN_ID = "6a31bc77da38895dfecc6962";
 const ACCESS_KEY = "$2a$10$PSWhMqV5dRadaudB0kH2eOiz068nAa0uxXf2zvXStpXxXF8Cp4P1G";
@@ -132,6 +132,8 @@ function mergePalpites(planilha, salvos) {
   return merged;
 }
 
+const FASES_MATA = ["16avos","Oitavas","Quartas","Semifinal","3º Lugar","Final"];
+
 export default function BolaoApp() {
   const [tela, setTela] = useState("ranking");
   const [usuario, setUsuario] = useState(null);
@@ -145,6 +147,7 @@ export default function BolaoApp() {
   const [msg, setMsg] = useState("");
   const [jogoAtivo, setJogoAtivo] = useState(null);
   const [placarTemp, setPlacarTemp] = useState([0, 0]);
+  const [jogoVerTodos, setJogoVerTodos] = useState(null);
 
   // Carrega dados do JSONBin ao iniciar
   useEffect(() => {
@@ -374,6 +377,10 @@ export default function BolaoApp() {
                           )}
                         </div>
                       )}
+                      <button onClick={() => setJogoVerTodos(j)}
+                        style={{marginTop:8,width:"100%",background:"#0d1e36",border:"1px solid #1e3a5f",borderRadius:6,padding:"6px 10px",color:"#7ec8e3",cursor:"pointer",fontSize:"0.72rem",fontWeight:600}}>
+                        👥 Ver palpites de todos
+                      </button>
                     </div>
                   );
                 })}
@@ -403,6 +410,10 @@ export default function BolaoApp() {
                           {Array.isArray(meuPalpite)?"Editar palpite":"Palpitar"}
                         </button>
                       )}
+                      <button onClick={() => setJogoVerTodos(j)}
+                        style={{marginTop:8,width:"100%",background:"#0d1e36",border:"1px solid #2a2a4e",borderRadius:6,padding:"6px 10px",color:"#7ec8e3",cursor:"pointer",fontSize:"0.72rem",fontWeight:600}}>
+                        👥 Ver palpites de todos
+                      </button>
                     </div>
                   );
                 })}
@@ -494,6 +505,50 @@ export default function BolaoApp() {
         )}
       </div>
 
+      {jogoVerTodos && (
+        <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.7)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}
+          onClick={() => setJogoVerTodos(null)}>
+          <div style={{background:"#112240",border:"2px solid #ffd700",borderRadius:14,padding:20,maxWidth:420,width:"100%",maxHeight:"80vh",overflowY:"auto"}}
+            onClick={e => e.stopPropagation()}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+              <div style={{fontWeight:800,fontSize:"0.95rem"}}>
+                {flag(jogoVerTodos.timeA)} {jogoVerTodos.timeA} <span style={{color:"#556"}}>vs</span> {jogoVerTodos.timeB} {flag(jogoVerTodos.timeB)}
+              </div>
+              <button onClick={() => setJogoVerTodos(null)} style={{background:"none",border:"none",color:"#7ec8e3",fontSize:"1.2rem",cursor:"pointer"}}>✕</button>
+            </div>
+            <div style={{fontSize:"0.65rem",color:"#7ec8e3",marginBottom:14}}>{formatData(jogoVerTodos.data)}</div>
+            {resultados[jogoVerTodos.id] && (
+              <div style={{background:"#0d4a1a",borderRadius:8,padding:"6px 10px",marginBottom:14,fontWeight:800,color:"#5dfc8d",textAlign:"center",fontSize:"0.9rem"}}>
+                Resultado: {resultados[jogoVerTodos.id][0]}×{resultados[jogoVerTodos.id][1]}
+              </div>
+            )}
+            <div style={{display:"flex",flexDirection:"column",gap:6}}>
+              {PARTICIPANTES.map(nome => {
+                const p = palpites[jogoVerTodos.id]?.[nome];
+                const temPalpite = Array.isArray(p);
+                const pontos = temPalpite && Array.isArray(resultados[jogoVerTodos.id])
+                  ? calcPontos(p, resultados[jogoVerTodos.id]) : null;
+                return (
+                  <div key={nome} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"#0d1e36",borderRadius:8,padding:"8px 12px"}}>
+                    <span style={{fontSize:"0.85rem",fontWeight:600}}>{nome}</span>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <span style={{fontSize:"0.85rem",fontWeight:700,color:temPalpite?"#7ec8e3":"#556"}}>
+                        {temPalpite ? `${p[0]}×${p[1]}` : "—"}
+                      </span>
+                      {pontos !== null && (
+                        <span style={{fontSize:"0.7rem",fontWeight:700,color:pontos===3?"#ffd700":pontos===1?"#7ec8e3":"#ff6b6b"}}>
+                          {pontos===3?"⭐":pontos===1?"✓":"✗"}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
       <div style={{position:"fixed",bottom:0,left:0,right:0,background:"#0a1628",borderTop:"2px solid #1e3a5f",display:"flex",justifyContent:"space-around",padding:"8px 0 12px",zIndex:100}}>
         {[
           {id:"ranking", icon:"🏆", label:"Ranking"},
@@ -540,7 +595,7 @@ function AdicionarMata({ onAdicionar }) {
   const [timeB, setTimeB] = useState("");
   const [data, setData] = useState("");
   const [hora, setHora] = useState("16:00");
-  const [fase, setFase] = useState("Oitavas");
+  const [fase, setFase] = useState("16avos");
 
   function add() {
     if (!timeA || !timeB || !data) return;
@@ -556,8 +611,8 @@ function AdicionarMata({ onAdicionar }) {
         <input placeholder="Time B" value={timeB} onChange={e=>setTimeB(e.target.value)} style={inp} />
         <input type="date" value={data} onChange={e=>setData(e.target.value)} style={inp} />
         <input type="time" value={hora} onChange={e=>setHora(e.target.value)} style={inp} />
-        <select value={fase} onChange={e=>setFase(e.target.value)} style={inp}>
-          {["Oitavas","Quartas","Semifinal","3º Lugar","Final"].map(f=><option key={f}>{f}</option>)}
+        <select value={fase} onChange={e=>setFase(e.target.value)} style={{...inp, gridColumn:"1 / -1"}}>
+          {FASES_MATA.map(f=><option key={f}>{f}</option>)}
         </select>
       </div>
       <button onClick={add} style={{background:"#ff9040",border:"none",borderRadius:8,padding:"8px 16px",color:"#0a1628",fontWeight:800,cursor:"pointer",width:"100%"}}>

@@ -3,12 +3,8 @@ import { useState, useEffect } from "react";
 const BIN_ID = "6a31bc77da38895dfecc6962";
 const ACCESS_KEY = "$2a$10$PSWhMqV5dRadaudB0kH2eOiz068nAa0uxXf2zvXStpXxXF8Cp4P1G";
 const JSONBIN_URL = `https://api.jsonbin.io/v3/b/${BIN_ID}`;
-const BIN_HEADERS = {
-  "Content-Type": "application/json",
-  "X-Access-Key": ACCESS_KEY,  // Access Key em vez de Master Key (resolve CORS)
-};
+const BIN_HEADERS = { "Content-Type": "application/json", "X-Access-Key": ACCESS_KEY };
 
-// ─── DB HELPERS (busca sempre o record mais recente antes de salvar) ──────────
 async function dbGetAll() {
   const res = await fetch(JSONBIN_URL + "/latest", { headers: BIN_HEADERS });
   if (!res.ok) throw new Error("Erro ao ler JSONBin");
@@ -17,19 +13,13 @@ async function dbGetAll() {
 }
 
 async function dbSet(key, value) {
-  // Sempre lê o estado mais recente antes de escrever (evita sobrescrever dados)
   const current = await dbGetAll();
   const updated = { ...current, [key]: value };
-  const res = await fetch(JSONBIN_URL, {
-    method: "PUT",
-    headers: BIN_HEADERS,
-    body: JSON.stringify(updated),
-  });
+  const res = await fetch(JSONBIN_URL, { method: "PUT", headers: BIN_HEADERS, body: JSON.stringify(updated) });
   if (!res.ok) throw new Error("Erro ao salvar JSONBin");
   return updated;
 }
 
-// ─── DADOS DO BOLÃO ────────────────────────────────────────────────
 const PARTICIPANTES = [
   "Alexandre","A. Diniz","Andre Gama","Andre Zani","Ana","Gilberto",
   "Larissa","Lorena","Carreira","Rafael","Suelen","Thais","Thalles",
@@ -103,11 +93,11 @@ const EMOJIS = {
   "Colômbia":"🇨🇴","Panamá":"🇵🇦"
 };
 
-function flag(team) { return EMOJIS[team] || "⚽"; }
+function flag(t) { return EMOJIS[t] || "⚽"; }
 
 function calcPontos(palpite, resultado) {
   if (!palpite || !resultado) return 0;
-  const [pa, pb] = palpite; const [ra, rb] = resultado;
+  const [pa, pb] = palpite, [ra, rb] = resultado;
   if (pa === ra && pb === rb) return 3;
   const vP = pa > pb ? "A" : pa < pb ? "B" : "E";
   const vR = ra > rb ? "A" : ra < rb ? "B" : "E";
@@ -122,17 +112,32 @@ function formatData(iso) {
 
 function jogoTravado(iso) { return new Date() >= new Date(iso); }
 
-// Merge palpites da planilha com os salvos no JSONBin (JSONBin tem prioridade)
 function mergePalpites(planilha, salvos) {
   const merged = {};
-  const todasChaves = new Set([...Object.keys(planilha), ...Object.keys(salvos || {})]);
-  for (const gid of todasChaves) {
-    merged[gid] = { ...(planilha[gid] || {}), ...(salvos?.[gid] || {}) };
-  }
+  const keys = new Set([...Object.keys(planilha), ...Object.keys(salvos || {})]);
+  for (const gid of keys) merged[gid] = { ...(planilha[gid] || {}), ...(salvos?.[gid] || {}) };
   return merged;
 }
 
 const FASES_MATA = ["16avos","Oitavas","Quartas","Semifinal","3º Lugar","Final"];
+
+// Agrupa uma lista de jogos em blocos: 1ª/2ª/3ª rodada (fase de grupos) e,
+// em seguida, um bloco por fase de mata-mata — apenas para fases que
+// realmente tiverem jogos cadastrados.
+function blocosDeJogos(lista) {
+  const blocos = [];
+  for (let r = 1; r <= 3; r++) {
+    const js = lista.filter(j => j.rodada === r);
+    if (js.length) blocos.push({ key: `r${r}`, label: `${r}ª Rodada`, jogos: js, mata: false });
+  }
+  for (const fase of FASES_MATA) {
+    const js = lista.filter(j => j.fase === fase).sort((a, b) => new Date(a.data) - new Date(b.data));
+    if (js.length) blocos.push({ key: fase, label: fase, jogos: js, mata: true });
+  }
+  return blocos;
+}
+
+const btnStyle = { background:"#1e3a5f",border:"none",borderRadius:6,width:40,height:32,color:"white",cursor:"pointer",fontSize:"0.9rem",fontWeight:700 };
 
 export default function BolaoApp() {
   const [tela, setTela] = useState("ranking");
@@ -148,8 +153,10 @@ export default function BolaoApp() {
   const [jogoAtivo, setJogoAtivo] = useState(null);
   const [placarTemp, setPlacarTemp] = useState([0, 0]);
   const [jogoVerTodos, setJogoVerTodos] = useState(null);
+  const [rodadasAbertas, setRodadasAbertas] = useState({ r1:true, r2:true, r3:true });
+  const [auditoriaUsuario, setAuditoriaUsuario] = useState(null);
+  const [auditoriaAbertos, setAuditoriaAbertos] = useState({});
 
-  // Carrega dados do JSONBin ao iniciar
   useEffect(() => {
     async function carregar() {
       try {
@@ -157,13 +164,10 @@ export default function BolaoApp() {
         const pSalvos = record["palpites"] || {};
         const r = record["resultados"];
         const m = record["mata"];
-        // Merge: planilha + JSONBin (JSONBin sobrescreve planilha em caso de conflito)
         setPalpites(mergePalpites(PALPITES_PLANILHA, pSalvos));
         if (r) setResultados(r);
         if (m) setJogosMatasMata(m);
-      } catch (e) {
-        setMsg("⚠️ Erro ao carregar dados: " + e.message);
-      }
+      } catch (e) { setMsg("⚠️ Erro ao carregar: " + e.message); }
       setLoading(false);
     }
     carregar();
@@ -173,32 +177,23 @@ export default function BolaoApp() {
 
   async function salvarPalpite(jogoId, placar) {
     setSalvando(true);
-    // Atualiza estado local imediatamente
-    const novosPalpites = {
-      ...palpites,
-      [jogoId]: { ...(palpites[jogoId] || {}), [usuario]: placar }
-    };
+    const novosPalpites = { ...palpites, [jogoId]: { ...(palpites[jogoId] || {}), [usuario]: placar } };
     setPalpites(novosPalpites);
-
     try {
-      // Calcula apenas os palpites que diferem da planilha original para salvar
       const extras = {};
       for (const gid of Object.keys(novosPalpites)) {
         for (const nome of Object.keys(novosPalpites[gid] || {})) {
-          const valPlanilha = PALPITES_PLANILHA[gid]?.[nome];
-          const valNovo = novosPalpites[gid][nome];
-          // Salva se não existe na planilha OU se o valor mudou
-          if (!valPlanilha || JSON.stringify(valPlanilha) !== JSON.stringify(valNovo)) {
+          const vP = PALPITES_PLANILHA[gid]?.[nome];
+          const vN = novosPalpites[gid][nome];
+          if (!vP || JSON.stringify(vP) !== JSON.stringify(vN)) {
             if (!extras[gid]) extras[gid] = {};
-            extras[gid][nome] = valNovo;
+            extras[gid][nome] = vN;
           }
         }
       }
       await dbSet("palpites", extras);
       showMsg("✅ Palpite salvo!");
-    } catch (e) {
-      showMsg("❌ Erro ao salvar: " + e.message);
-    }
+    } catch (e) { showMsg("❌ Erro ao salvar: " + e.message); }
     setSalvando(false);
     setJogoAtivo(null);
   }
@@ -206,63 +201,186 @@ export default function BolaoApp() {
   async function salvarResultado(jogoId, placar) {
     const novos = { ...resultados, [jogoId]: placar };
     setResultados(novos);
-    try {
-      await dbSet("resultados", novos);
-      showMsg("✅ Resultado salvo!");
-    } catch (e) {
-      showMsg("❌ Erro ao salvar resultado: " + e.message);
-    }
+    try { await dbSet("resultados", novos); showMsg("✅ Resultado salvo!"); }
+    catch (e) { showMsg("❌ Erro: " + e.message); }
   }
 
   async function adicionarJogoMata(jogo) {
     const novos = [...jogosMatasMata, jogo];
     setJogosMatasMata(novos);
-    try {
-      await dbSet("mata", novos);
-      showMsg("✅ Jogo adicionado!");
-    } catch (e) {
-      showMsg("❌ Erro ao adicionar jogo: " + e.message);
-    }
+    try { await dbSet("mata", novos); showMsg("✅ Jogo adicionado!"); }
+    catch (e) { showMsg("❌ Erro: " + e.message); }
   }
 
   async function removerJogoMata(idx) {
     const novos = jogosMatasMata.filter((_, i) => i !== idx);
     setJogosMatasMata(novos);
-    try {
-      await dbSet("mata", novos);
-      showMsg("✅ Jogo removido!");
-    } catch (e) {
-      showMsg("❌ Erro ao remover jogo: " + e.message);
-    }
+    try { await dbSet("mata", novos); showMsg("✅ Removido!"); }
+    catch (e) { showMsg("❌ Erro: " + e.message); }
   }
 
-  const todosJogos = [...JOGOS_GRUPOS, ...jogosMatasMata];
+  const mataOrdenado = [...jogosMatasMata].sort((a, b) => new Date(a.data) - new Date(b.data));
+  const todosJogos = [...JOGOS_GRUPOS, ...mataOrdenado];
 
   function pontosUsuario(nome) {
-    let total = 0;
-    for (const jogo of todosJogos) {
-      const resultado = resultados[jogo.id];
-      const palpite = palpites[jogo.id]?.[nome];
-      if (Array.isArray(palpite) && Array.isArray(resultado))
-        total += calcPontos(palpite, resultado);
-    }
-    return total;
+    return todosJogos.reduce((total, j) => {
+      const r = resultados[j.id], p = palpites[j.id]?.[nome];
+      return total + (Array.isArray(p) && Array.isArray(r) ? calcPontos(p, r) : 0);
+    }, 0);
   }
 
   const ranking = PARTICIPANTES.map(n => ({ nome: n, pontos: pontosUsuario(n) }))
     .sort((a, b) => b.pontos - a.pontos);
 
   const agora = new Date();
-  const proximos = todosJogos
-    .filter(j => new Date(j.data) > agora)
-    .sort((a, b) => new Date(a.data) - new Date(b.data))
-    .slice(0, 5);
+  const proximos = todosJogos.filter(j => new Date(j.data) > agora)
+    .sort((a, b) => new Date(a.data) - new Date(b.data)).slice(0, 5);
+
+  // Item de jogo reutilizado tanto na fase de grupos quanto no mata-mata
+  function renderItemJogo(j) {
+    const travado = jogoTravado(j.data);
+    const resultado = resultados[j.id];
+    const meuPalpite = usuario ? palpites[j.id]?.[usuario] : null;
+    const pontos = Array.isArray(meuPalpite) && Array.isArray(resultado) ? calcPontos(meuPalpite, resultado) : null;
+    return (
+      <div key={j.id} style={{background:"#0d1e36",borderBottom:"1px solid #1e3a5f",padding:"12px 14px"}}>
+        <div style={{fontSize:"0.65rem",color:"#7ec8e3",marginBottom:8,display:"flex",justifyContent:"space-between"}}>
+          <span>{formatData(j.data)}</span>
+          {travado ? <span style={{color:"#ff6b6b"}}>🔒 Encerrado</span> : <span style={{color:"#5dfc8d"}}>🟢 Aberto</span>}
+        </div>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+          <div style={{flex:1,textAlign:"left",fontWeight:700,fontSize:"0.9rem"}}>{flag(j.timeA)} {j.timeA}</div>
+          <div style={{textAlign:"center"}}>
+            {resultado
+              ? <div style={{background:"#0d4a1a",borderRadius:8,padding:"4px 10px",fontWeight:800,color:"#5dfc8d"}}>{resultado[0]}×{resultado[1]}</div>
+              : <div style={{color:"#444",fontSize:"0.8rem"}}>vs</div>}
+          </div>
+          <div style={{flex:1,textAlign:"right",fontWeight:700,fontSize:"0.9rem"}}>{j.timeB} {flag(j.timeB)}</div>
+        </div>
+        {usuario && (
+          <div style={{marginTop:8,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+            {Array.isArray(meuPalpite)
+              ? <span style={{fontSize:"0.75rem",color:"#7ec8e3"}}>Seu palpite: {meuPalpite[0]}×{meuPalpite[1]}</span>
+              : <span style={{fontSize:"0.75rem",color:"#556"}}>Sem palpite</span>}
+            {!travado && (
+              <button onClick={() => { setJogoAtivo(j); setPlacarTemp(Array.isArray(meuPalpite)?meuPalpite:[1,0]); setTela("palpitar"); }}
+                style={{background:"#0057b7",border:"none",borderRadius:6,padding:"4px 10px",color:"white",cursor:"pointer",fontSize:"0.75rem",fontWeight:600}}>
+                {Array.isArray(meuPalpite)?"Editar":"Palpitar"}
+              </button>
+            )}
+            {pontos !== null && (
+              <span style={{fontSize:"0.75rem",fontWeight:700,color:pontos===3?"#ffd700":pontos===1?"#7ec8e3":"#ff6b6b"}}>
+                {pontos===3?"⭐ 3 pts":pontos===1?"✓ 1 pt":"✗ 0 pts"}
+              </span>
+            )}
+          </div>
+        )}
+        <button onClick={() => setJogoVerTodos(j)}
+          style={{marginTop:8,width:"100%",background:"#112240",border:"1px solid #1e3a5f",borderRadius:6,padding:"6px 10px",color:"#7ec8e3",cursor:"pointer",fontSize:"0.72rem",fontWeight:600}}>
+          👥 Ver palpites de todos
+        </button>
+      </div>
+    );
+  }
+
+  // Barra de navegação inferior, reutilizada em todas as telas (inclusive auditoria com participante selecionado)
+  function NavBar() {
+    return (
+      <div style={{position:"fixed",bottom:0,left:0,right:0,background:"#0a1628",borderTop:"2px solid #1e3a5f",display:"flex",justifyContent:"space-around",padding:"8px 0 12px",zIndex:100}}>
+        {[
+          {id:"ranking",   icon:"🏆", label:"Ranking"},
+          {id:"jogos",     icon:"⚽", label:"Jogos"},
+          {id:"auditoria", icon:"🔍", label:"Auditoria"},
+          {id:"admin",     icon:"⚙️", label:"Admin"},
+        ].map(t => (
+          <button key={t.id} onClick={() => { setTela(t.id); setJogoAtivo(null); setAuditoriaUsuario(null); }}
+            style={{background:"none",border:"none",color:tela===t.id?"#ffd700":"#556",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:2,padding:"4px 12px",borderRadius:8}}>
+            <span style={{fontSize:"1.2rem"}}>{t.icon}</span>
+            <span style={{fontSize:"0.6rem",fontWeight:tela===t.id?700:400}}>{t.label}</span>
+          </button>
+        ))}
+      </div>
+    );
+  }
 
   if (loading) return (
     <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:"#0a1628",color:"#ffd700",fontFamily:"sans-serif",fontSize:"1.2rem"}}>
       ⚽ Carregando Bolão...
     </div>
   );
+
+  // ─── TELA AUDITORIA DETALHE ───────────────────────────────────────
+  if (tela === "auditoria" && auditoriaUsuario) {
+    const jogosComPontos = todosJogos.filter(j => {
+      const r = resultados[j.id], p = palpites[j.id]?.[auditoriaUsuario];
+      return Array.isArray(p) && Array.isArray(r) && calcPontos(p, r) > 0;
+    });
+    const totalPts = jogosComPontos.reduce((s, j) => s + calcPontos(palpites[j.id]?.[auditoriaUsuario], resultados[j.id]), 0);
+    const blocosAuditoria = blocosDeJogos(jogosComPontos);
+    return (
+      <div style={{fontFamily:"'Segoe UI',sans-serif",background:"#0a1628",minHeight:"100vh",color:"#e8eaf0"}}>
+        <div style={{background:"linear-gradient(135deg,#003580 0%,#0057b7 50%,#003580 100%)",padding:"16px 20px",borderBottom:"3px solid #ffd700"}}>
+          <div style={{maxWidth:600,margin:"0 auto"}}>
+            <button onClick={() => setAuditoriaUsuario(null)} style={{background:"none",border:"none",color:"#7ec8e3",cursor:"pointer",fontSize:"0.9rem",padding:0,marginBottom:4}}>← Voltar</button>
+            <div style={{fontSize:"1.1rem",fontWeight:800,color:"#ffd700"}}>🔍 Auditoria — {auditoriaUsuario}</div>
+            <div style={{fontSize:"0.75rem",color:"#b8d4ff",marginTop:2}}>{jogosComPontos.length} jogo(s) pontuado(s) · {totalPts} pts no total</div>
+          </div>
+        </div>
+        {msg && <div style={{background:"#1a3a2a",color:"#5dfc8d",textAlign:"center",padding:"8px",fontSize:"0.9rem",position:"sticky",top:0,zIndex:10}}>{msg}</div>}
+        <div style={{maxWidth:600,margin:"0 auto",padding:"16px 16px 100px"}}>
+          {jogosComPontos.length === 0 && (
+            <div style={{color:"#556",textAlign:"center",marginTop:40,fontSize:"0.9rem"}}>Nenhum ponto registrado ainda.</div>
+          )}
+          {blocosAuditoria.map(bloco => {
+            const aberta = !!auditoriaAbertos[bloco.key];
+            const pontosBloco = bloco.jogos.reduce((s, j) => s + calcPontos(palpites[j.id]?.[auditoriaUsuario], resultados[j.id]), 0);
+            const corTitulo = bloco.mata ? "#ff9040" : "#ffd700";
+            return (
+              <div key={bloco.key} style={{marginBottom:12}}>
+                <button onClick={() => setAuditoriaAbertos(prev => ({...prev, [bloco.key]: !prev[bloco.key]}))}
+                  style={{width:"100%",display:"flex",justifyContent:"space-between",alignItems:"center",background:"#112240",border:"1px solid #1e3a5f",borderRadius:10,padding:"12px 16px",cursor:"pointer",color:corTitulo,fontWeight:700,fontSize:"0.8rem",letterSpacing:1,textTransform:"uppercase"}}>
+                  <span>{bloco.mata ? "⚔️" : "⚽"} {bloco.label}</span>
+                  <div style={{display:"flex",alignItems:"center",gap:10}}>
+                    <span style={{fontSize:"0.7rem",color:"#7ec8e3",fontWeight:400}}>{bloco.jogos.length} jogo(s) · {pontosBloco} pts</span>
+                    <span style={{fontSize:"1rem",color:"#7ec8e3"}}>{aberta?"▲":"▼"}</span>
+                  </div>
+                </button>
+                {aberta && (
+                  <div style={{border:"1px solid #1e3a5f",borderTop:"none",borderRadius:"0 0 10px 10px",overflow:"hidden"}}>
+                    {bloco.jogos.map(j => {
+                      const p = palpites[j.id][auditoriaUsuario];
+                      const r = resultados[j.id];
+                      const pts = calcPontos(p, r);
+                      return (
+                        <div key={j.id} style={{background:"#112240",borderBottom:`1px solid ${pts===3?"#ffd700":"#1e6a3f"}`,padding:"12px 14px"}}>
+                          <div style={{fontSize:"0.65rem",color:"#7ec8e3",marginBottom:6}}>{formatData(j.data)}</div>
+                          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
+                            <div style={{flex:1,fontWeight:700,fontSize:"0.9rem"}}>{flag(j.timeA)} {j.timeA}</div>
+                            <div style={{textAlign:"center"}}>
+                              <div style={{background:"#0d4a1a",borderRadius:6,padding:"3px 10px",fontWeight:800,color:"#5dfc8d",fontSize:"0.9rem"}}>{r[0]}×{r[1]}</div>
+                              <div style={{fontSize:"0.6rem",color:"#556",marginTop:2}}>resultado</div>
+                            </div>
+                            <div style={{flex:1,textAlign:"right",fontWeight:700,fontSize:"0.9rem"}}>{j.timeB} {flag(j.timeB)}</div>
+                          </div>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginTop:8}}>
+                            <span style={{fontSize:"0.75rem",color:"#7ec8e3"}}>Palpite: {p[0]}×{p[1]}</span>
+                            <span style={{fontWeight:800,color:pts===3?"#ffd700":"#7ec8e3",fontSize:"0.85rem"}}>
+                              {pts===3?"⭐ 3 pts":"✓ 1 pt"}
+                            </span>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <NavBar />
+      </div>
+    );
+  }
 
   return (
     <div style={{fontFamily:"'Segoe UI',sans-serif",background:"#0a1628",minHeight:"100vh",color:"#e8eaf0"}}>
@@ -277,13 +395,15 @@ export default function BolaoApp() {
       {msg && <div style={{background:"#1a3a2a",color:"#5dfc8d",textAlign:"center",padding:"8px",fontSize:"0.9rem",position:"sticky",top:0,zIndex:10}}>{msg}</div>}
 
       <div style={{maxWidth:600,margin:"0 auto",padding:"0 0 80px"}}>
-        {!usuario && (
+
+        {/* Seleção de usuário */}
+        {!usuario && tela !== "auditoria" && (
           <div style={{padding:"24px 16px"}}>
             <div style={{fontSize:"1.1rem",fontWeight:700,marginBottom:16,color:"#ffd700"}}>Quem é você?</div>
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
               {PARTICIPANTES.map(n => (
                 <button key={n} onClick={() => setUsuario(n)}
-                  style={{background:"#112240",border:"1px solid #1e3a5f",borderRadius:10,padding:"12px 8px",color:"#e8eaf0",cursor:"pointer",fontSize:"0.9rem",fontWeight:600,transition:"all 0.15s"}}
+                  style={{background:"#112240",border:"1px solid #1e3a5f",borderRadius:10,padding:"12px 8px",color:"#e8eaf0",cursor:"pointer",fontSize:"0.9rem",fontWeight:600}}
                   onMouseOver={e => e.target.style.background="#1e3a5f"}
                   onMouseOut={e => e.target.style.background="#112240"}>
                   {n}
@@ -293,14 +413,15 @@ export default function BolaoApp() {
           </div>
         )}
 
-        {proximos.length > 0 && (
+        {/* Próximos jogos */}
+        {proximos.length > 0 && tela !== "auditoria" && (
           <div style={{padding:"16px 16px 0"}}>
             <div style={{fontSize:"0.7rem",fontWeight:700,letterSpacing:2,color:"#ffd700",marginBottom:8,textTransform:"uppercase"}}>⏰ Próximos Jogos</div>
             <div style={{display:"flex",gap:8,overflowX:"auto",paddingBottom:8}}>
               {proximos.map(j => {
                 const temPalpite = usuario && Array.isArray(palpites[j.id]?.[usuario]);
-                const minutosRestantes = Math.floor((new Date(j.data) - agora) / 60000);
-                const urgente = minutosRestantes < 120;
+                const mins = Math.floor((new Date(j.data) - agora) / 60000);
+                const urgente = mins < 120;
                 return (
                   <div key={j.id} style={{minWidth:150,background:urgente?"#2a1a00":"#112240",border:`1px solid ${urgente?"#ff6b00":"#1e3a5f"}`,borderRadius:10,padding:"10px 12px",flexShrink:0,cursor:usuario?"pointer":"default"}}
                     onClick={() => usuario && (setJogoAtivo(j), setPlacarTemp(palpites[j.id]?.[usuario] || [1,0]), setTela("palpitar"))}>
@@ -317,6 +438,7 @@ export default function BolaoApp() {
           </div>
         )}
 
+        {/* RANKING */}
         {tela === "ranking" && (
           <div style={{padding:"16px"}}>
             <div style={{fontSize:"0.7rem",fontWeight:700,letterSpacing:2,color:"#ffd700",marginBottom:12,textTransform:"uppercase"}}>🏆 Classificação</div>
@@ -332,96 +454,37 @@ export default function BolaoApp() {
           </div>
         )}
 
+        {/* JOGOS */}
         {tela === "jogos" && (
           <div style={{padding:"16px"}}>
-            {[1,2,3].map(r => (
-              <div key={r}>
-                <div style={{fontSize:"0.7rem",fontWeight:700,letterSpacing:2,color:"#ffd700",marginBottom:10,textTransform:"uppercase",marginTop:r>1?20:0}}>
-                  {r}ª Rodada
+            {blocosDeJogos(todosJogos).map(bloco => {
+              const aberta = !!rodadasAbertas[bloco.key];
+              const comResultado = bloco.jogos.filter(j => resultados[j.id]).length;
+              const corTitulo = bloco.mata ? "#ff9040" : "#ffd700";
+              return (
+                <div key={bloco.key} style={{marginBottom:12}}>
+                  {/* Header clicável do bloco (rodada de grupos ou fase de mata-mata) */}
+                  <button onClick={() => setRodadasAbertas(prev => ({...prev, [bloco.key]: !prev[bloco.key]}))}
+                    style={{width:"100%",display:"flex",justifyContent:"space-between",alignItems:"center",background:"#112240",border:"1px solid #1e3a5f",borderRadius:10,padding:"12px 16px",cursor:"pointer",color:corTitulo,fontWeight:700,fontSize:"0.8rem",letterSpacing:1,textTransform:"uppercase"}}>
+                    <span>{bloco.mata ? "⚔️" : "⚽"} {bloco.label}</span>
+                    <div style={{display:"flex",alignItems:"center",gap:10}}>
+                      <span style={{fontSize:"0.7rem",color:"#7ec8e3",fontWeight:400}}>{comResultado}/{bloco.jogos.length} resultados</span>
+                      <span style={{fontSize:"1rem",color:"#7ec8e3"}}>{aberta?"▲":"▼"}</span>
+                    </div>
+                  </button>
+
+                  {aberta && (
+                    <div style={{border:"1px solid #1e3a5f",borderTop:"none",borderRadius:"0 0 10px 10px",overflow:"hidden"}}>
+                      {bloco.jogos.map(j => renderItemJogo(j))}
+                    </div>
+                  )}
                 </div>
-                {JOGOS_GRUPOS.filter(j => j.rodada === r).map(j => {
-                  const travado = jogoTravado(j.data);
-                  const resultado = resultados[j.id];
-                  const meuPalpite = usuario ? palpites[j.id]?.[usuario] : null;
-                  const pontos = Array.isArray(meuPalpite) && Array.isArray(resultado) ? calcPontos(meuPalpite, resultado) : null;
-                  return (
-                    <div key={j.id} style={{background:"#112240",border:"1px solid #1e3a5f",borderRadius:10,padding:"12px 14px",marginBottom:8}}>
-                      <div style={{fontSize:"0.65rem",color:"#7ec8e3",marginBottom:8,display:"flex",justifyContent:"space-between"}}>
-                        <span>{formatData(j.data)}</span>
-                        {travado ? <span style={{color:"#ff6b6b"}}>🔒 Encerrado</span> : <span style={{color:"#5dfc8d"}}>🟢 Aberto</span>}
-                      </div>
-                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
-                        <div style={{flex:1,textAlign:"left",fontWeight:700,fontSize:"0.9rem"}}>{flag(j.timeA)} {j.timeA}</div>
-                        <div style={{textAlign:"center"}}>
-                          {resultado
-                            ? <div style={{background:"#0d4a1a",borderRadius:8,padding:"4px 10px",fontWeight:800,color:"#5dfc8d"}}>{resultado[0]}×{resultado[1]}</div>
-                            : <div style={{color:"#444",fontSize:"0.8rem"}}>vs</div>}
-                        </div>
-                        <div style={{flex:1,textAlign:"right",fontWeight:700,fontSize:"0.9rem"}}>{j.timeB} {flag(j.timeB)}</div>
-                      </div>
-                      {usuario && (
-                        <div style={{marginTop:8,display:"flex",alignItems:"center",justifyContent:"space-between"}}>
-                          {Array.isArray(meuPalpite)
-                            ? <span style={{fontSize:"0.75rem",color:"#7ec8e3"}}>Seu palpite: {meuPalpite[0]}×{meuPalpite[1]}</span>
-                            : <span style={{fontSize:"0.75rem",color:"#556"}}>Sem palpite</span>}
-                          {!travado && (
-                            <button onClick={() => { setJogoAtivo(j); setPlacarTemp(Array.isArray(meuPalpite)?meuPalpite:[1,0]); setTela("palpitar"); }}
-                              style={{background:"#0057b7",border:"none",borderRadius:6,padding:"4px 10px",color:"white",cursor:"pointer",fontSize:"0.75rem",fontWeight:600}}>
-                              {Array.isArray(meuPalpite)?"Editar":"Palpitar"}
-                            </button>
-                          )}
-                          {pontos !== null && (
-                            <span style={{fontSize:"0.75rem",fontWeight:700,color:pontos===3?"#ffd700":pontos===1?"#7ec8e3":"#ff6b6b"}}>
-                              {pontos===3?"⭐ 3 pts":pontos===1?"✓ 1 pt":"✗ 0 pts"}
-                            </span>
-                          )}
-                        </div>
-                      )}
-                      <button onClick={() => setJogoVerTodos(j)}
-                        style={{marginTop:8,width:"100%",background:"#0d1e36",border:"1px solid #1e3a5f",borderRadius:6,padding:"6px 10px",color:"#7ec8e3",cursor:"pointer",fontSize:"0.72rem",fontWeight:600}}>
-                        👥 Ver palpites de todos
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            ))}
-            {jogosMatasMata.length > 0 && (
-              <div>
-                <div style={{fontSize:"0.7rem",fontWeight:700,letterSpacing:2,color:"#ff9040",marginBottom:10,textTransform:"uppercase",marginTop:20}}>⚔️ Mata-mata</div>
-                {jogosMatasMata.map((j,idx) => {
-                  const travado = jogoTravado(j.data);
-                  const resultado = resultados[j.id];
-                  const meuPalpite = usuario ? palpites[j.id]?.[usuario] : null;
-                  return (
-                    <div key={j.id} style={{background:"#1a1a2e",border:"1px solid #2a2a4e",borderRadius:10,padding:"12px 14px",marginBottom:8}}>
-                      <div style={{fontSize:"0.65rem",color:"#ff9040",marginBottom:8,display:"flex",justifyContent:"space-between"}}>
-                        <span>{j.fase} · {formatData(j.data)}</span>
-                        {travado ? <span style={{color:"#ff6b6b"}}>🔒</span> : <span style={{color:"#5dfc8d"}}>🟢</span>}
-                      </div>
-                      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",gap:8}}>
-                        <div style={{flex:1,fontWeight:700,fontSize:"0.9rem"}}>{flag(j.timeA)} {j.timeA}</div>
-                        <div>{resultado ? <div style={{background:"#1a2a1a",borderRadius:6,padding:"3px 8px",fontWeight:800,color:"#5dfc8d"}}>{resultado[0]}×{resultado[1]}</div> : <span style={{color:"#444"}}>vs</span>}</div>
-                        <div style={{flex:1,textAlign:"right",fontWeight:700,fontSize:"0.9rem"}}>{j.timeB} {flag(j.timeB)}</div>
-                      </div>
-                      {usuario && !travado && (
-                        <button onClick={() => { setJogoAtivo(j); setPlacarTemp(Array.isArray(meuPalpite)?meuPalpite:[1,0]); setTela("palpitar"); }}
-                          style={{marginTop:8,background:"#0057b7",border:"none",borderRadius:6,padding:"4px 10px",color:"white",cursor:"pointer",fontSize:"0.75rem",fontWeight:600}}>
-                          {Array.isArray(meuPalpite)?"Editar palpite":"Palpitar"}
-                        </button>
-                      )}
-                      <button onClick={() => setJogoVerTodos(j)}
-                        style={{marginTop:8,width:"100%",background:"#0d1e36",border:"1px solid #2a2a4e",borderRadius:6,padding:"6px 10px",color:"#7ec8e3",cursor:"pointer",fontSize:"0.72rem",fontWeight:600}}>
-                        👥 Ver palpites de todos
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+              );
+            })}
           </div>
         )}
 
+        {/* PALPITAR */}
         {tela === "palpitar" && jogoAtivo && (
           <div style={{padding:"16px"}}>
             <button onClick={() => { setJogoAtivo(null); setTela("jogos"); }} style={{background:"none",border:"none",color:"#7ec8e3",cursor:"pointer",fontSize:"0.9rem",marginBottom:16,padding:0}}>
@@ -454,9 +517,7 @@ export default function BolaoApp() {
                   <button onClick={() => setPlacarTemp([placarTemp[0], Math.max(0,placarTemp[1]-1)])} style={btnStyle}>▼</button>
                 </div>
               </div>
-              <div style={{fontSize:"0.72rem",color:"#888",margin:"16px 0 8px"}}>
-                1 pt = acertar vencedor · 3 pts = placar exato
-              </div>
+              <div style={{fontSize:"0.72rem",color:"#888",margin:"16px 0 8px"}}>1 pt = acertar vencedor · 3 pts = placar exato</div>
               <button onClick={() => salvarPalpite(jogoAtivo.id, placarTemp)} disabled={salvando}
                 style={{background:"#ffd700",border:"none",borderRadius:10,padding:"14px 32px",color:"#0a1628",fontWeight:800,fontSize:"1rem",cursor:"pointer",width:"100%",marginTop:8}}>
                 {salvando ? "Salvando..." : "💾 Confirmar Palpite"}
@@ -465,6 +526,33 @@ export default function BolaoApp() {
           </div>
         )}
 
+        {/* AUDITORIA (lista de participantes) */}
+        {tela === "auditoria" && !auditoriaUsuario && (
+          <div style={{padding:"16px"}}>
+            <div style={{fontSize:"0.7rem",fontWeight:700,letterSpacing:2,color:"#ffd700",marginBottom:12,textTransform:"uppercase"}}>🔍 Auditoria</div>
+            <div style={{fontSize:"0.8rem",color:"#7ec8e3",marginBottom:16}}>Selecione um participante para ver os jogos em que pontuou:</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              {PARTICIPANTES.map(n => {
+                const pts = pontosUsuario(n);
+                const jogosComPts = todosJogos.filter(j => {
+                  const r = resultados[j.id], p = palpites[j.id]?.[n];
+                  return Array.isArray(p) && Array.isArray(r) && calcPontos(p, r) > 0;
+                }).length;
+                return (
+                  <button key={n} onClick={() => { setAuditoriaUsuario(n); setAuditoriaAbertos({}); }}
+                    style={{background:"#112240",border:"1px solid #1e3a5f",borderRadius:10,padding:"12px 8px",color:"#e8eaf0",cursor:"pointer",textAlign:"left"}}
+                    onMouseOver={e => e.currentTarget.style.background="#1e3a5f"}
+                    onMouseOut={e => e.currentTarget.style.background="#112240"}>
+                    <div style={{fontWeight:700,fontSize:"0.9rem",marginBottom:4}}>{n}</div>
+                    <div style={{fontSize:"0.72rem",color:"#ffd700"}}>{pts} pts · {jogosComPts} acerto(s)</div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {/* ADMIN */}
         {tela === "admin" && (
           <div style={{padding:"16px"}}>
             {!adminOk ? (
@@ -480,23 +568,19 @@ export default function BolaoApp() {
             ) : (
               <div>
                 <div style={{fontSize:"0.7rem",fontWeight:700,letterSpacing:2,color:"#ffd700",marginBottom:12,textTransform:"uppercase"}}>🎯 Inserir Resultados</div>
-                {todosJogos.map(j => {
-                  const r = resultados[j.id];
-                  const travado = jogoTravado(j.data);
-                  return (
-                    <div key={j.id} style={{background:"#112240",border:"1px solid #1e3a5f",borderRadius:10,padding:"12px",marginBottom:8}}>
-                      <div style={{fontSize:"0.75rem",color:"#7ec8e3",marginBottom:6}}>{flag(j.timeA)} {j.timeA} vs {j.timeB} {flag(j.timeB)}</div>
-                      <div style={{fontSize:"0.65rem",color:"#556",marginBottom:8}}>{formatData(j.data)}{!travado && " · ainda não iniciou"}</div>
-                      <AdminResultado jogoId={j.id} resultado={r} onSalvar={salvarResultado} />
-                    </div>
-                  );
-                })}
+                {todosJogos.map(j => (
+                  <div key={j.id} style={{background:"#112240",border:"1px solid #1e3a5f",borderRadius:10,padding:"12px",marginBottom:8}}>
+                    <div style={{fontSize:"0.75rem",color:"#7ec8e3",marginBottom:6}}>{flag(j.timeA)} {j.timeA} vs {j.timeB} {flag(j.timeB)}{j.fase ? ` · ${j.fase}` : ""}</div>
+                    <div style={{fontSize:"0.65rem",color:"#556",marginBottom:8}}>{formatData(j.data)}{!jogoTravado(j.data) && " · ainda não iniciou"}</div>
+                    <AdminResultado jogoId={j.id} resultado={resultados[j.id]} onSalvar={salvarResultado} />
+                  </div>
+                ))}
                 <div style={{fontSize:"0.7rem",fontWeight:700,letterSpacing:2,color:"#ff9040",margin:"20px 0 12px",textTransform:"uppercase"}}>➕ Adicionar Jogo Mata-Mata</div>
                 <AdicionarMata onAdicionar={adicionarJogoMata} />
-                {jogosMatasMata.map((j,idx) => (
+                {mataOrdenado.map((j, idx) => (
                   <div key={j.id} style={{background:"#1a1a2e",border:"1px solid #2a2a4e",borderRadius:8,padding:"10px 12px",marginBottom:6,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                    <span style={{fontSize:"0.8rem"}}>{j.fase}: {j.timeA} vs {j.timeB}</span>
-                    <button onClick={() => removerJogoMata(idx)} style={{background:"#5a1a1a",border:"none",borderRadius:6,padding:"4px 8px",color:"#ff6b6b",cursor:"pointer",fontSize:"0.75rem"}}>Remover</button>
+                    <span style={{fontSize:"0.8rem"}}>{j.fase}: {j.timeA} vs {j.timeB} · {formatData(j.data)}</span>
+                    <button onClick={() => removerJogoMata(jogosMatasMata.indexOf(j))} style={{background:"#5a1a1a",border:"none",borderRadius:6,padding:"4px 8px",color:"#ff6b6b",cursor:"pointer",fontSize:"0.75rem"}}>Remover</button>
                   </div>
                 ))}
               </div>
@@ -505,6 +589,7 @@ export default function BolaoApp() {
         )}
       </div>
 
+      {/* Modal ver palpites de todos */}
       {jogoVerTodos && (
         <div style={{position:"fixed",top:0,left:0,right:0,bottom:0,background:"rgba(0,0,0,0.7)",zIndex:200,display:"flex",alignItems:"center",justifyContent:"center",padding:16}}
           onClick={() => setJogoVerTodos(null)}>
@@ -526,8 +611,7 @@ export default function BolaoApp() {
               {PARTICIPANTES.map(nome => {
                 const p = palpites[jogoVerTodos.id]?.[nome];
                 const temPalpite = Array.isArray(p);
-                const pontos = temPalpite && Array.isArray(resultados[jogoVerTodos.id])
-                  ? calcPontos(p, resultados[jogoVerTodos.id]) : null;
+                const pontos = temPalpite && Array.isArray(resultados[jogoVerTodos.id]) ? calcPontos(p, resultados[jogoVerTodos.id]) : null;
                 return (
                   <div key={nome} style={{display:"flex",justifyContent:"space-between",alignItems:"center",background:"#0d1e36",borderRadius:8,padding:"8px 12px"}}>
                     <span style={{fontSize:"0.85rem",fontWeight:600}}>{nome}</span>
@@ -549,27 +633,10 @@ export default function BolaoApp() {
         </div>
       )}
 
-      <div style={{position:"fixed",bottom:0,left:0,right:0,background:"#0a1628",borderTop:"2px solid #1e3a5f",display:"flex",justifyContent:"space-around",padding:"8px 0 12px",zIndex:100}}>
-        {[
-          {id:"ranking", icon:"🏆", label:"Ranking"},
-          {id:"jogos",   icon:"⚽", label:"Jogos"},
-          {id:"admin",   icon:"⚙️", label:"Admin"},
-        ].map(t => (
-          <button key={t.id} onClick={() => { setTela(t.id); setJogoAtivo(null); }}
-            style={{background:"none",border:"none",color:tela===t.id?"#ffd700":"#556",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:2,padding:"4px 16px",borderRadius:8}}>
-            <span style={{fontSize:"1.3rem"}}>{t.icon}</span>
-            <span style={{fontSize:"0.65rem",fontWeight:tela===t.id?700:400}}>{t.label}</span>
-          </button>
-        ))}
-      </div>
+      <NavBar />
     </div>
   );
 }
-
-const btnStyle = {
-  background:"#1e3a5f",border:"none",borderRadius:6,width:40,height:32,color:"white",
-  cursor:"pointer",fontSize:"0.9rem",fontWeight:700
-};
 
 function AdminResultado({ jogoId, resultado, onSalvar }) {
   const [gA, setGA] = useState(resultado?.[0] ?? "");
@@ -612,7 +679,7 @@ function AdicionarMata({ onAdicionar }) {
         <input type="date" value={data} onChange={e=>setData(e.target.value)} style={inp} />
         <input type="time" value={hora} onChange={e=>setHora(e.target.value)} style={inp} />
         <select value={fase} onChange={e=>setFase(e.target.value)} style={{...inp, gridColumn:"1 / -1"}}>
-          {FASES_MATA.map(f=><option key={f}>{f}</option>)}
+          {FASES_MATA.map(f => <option key={f}>{f}</option>)}
         </select>
       </div>
       <button onClick={add} style={{background:"#ff9040",border:"none",borderRadius:8,padding:"8px 16px",color:"#0a1628",fontWeight:800,cursor:"pointer",width:"100%"}}>
